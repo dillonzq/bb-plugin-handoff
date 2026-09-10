@@ -1209,7 +1209,7 @@ function AdoptSettingsAction() {
             asChild
             size="icon"
             variant="ghost"
-            className={COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS}
+            className={cn(COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS, "max-md:hidden")}
           >
             <a href="/settings/plugins/handoff" aria-label="Import agent session">
               <Icon name="Download" aria-hidden />
