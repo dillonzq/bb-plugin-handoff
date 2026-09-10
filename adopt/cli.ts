@@ -3,6 +3,7 @@
 import type { BbPluginApi } from "@bb/plugin-sdk";
 import { deriveHomeDir } from "../capture";
 import { REASONING_LEVELS, type ReasoningLevel } from "../handoff";
+import { primaryHostIdOf } from "../machines";
 import {
   collectSessions,
   listRemoteSessionsForDirectory,
@@ -140,12 +141,11 @@ async function remoteInvokingHost(
     // deno-lint-ignore no-explicit-any
     const thread = (await bb.sdk.threads.get({ threadId })) as any;
     if (!thread.environmentId) return null;
-    const [environment, config] = await Promise.all([
+    const [environment, primaryHostId] = await Promise.all([
       bb.sdk.environments.get({ environmentId: thread.environmentId }),
-      bb.sdk.system.config(),
+      primaryHostIdOf(bb),
     ]);
     const hostId = environment.hostId ?? null;
-    const primaryHostId = config.primaryHostId ?? null;
     return hostId && primaryHostId && hostId !== primaryHostId ? hostId : null;
   } catch {
     return null;

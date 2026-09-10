@@ -27,8 +27,8 @@ import {
   planTransfer,
   listProvidersBounded,
   projectSources,
-  sourcePathOnHost,
   sourcePathOnHostFrom,
+  type Machine,
   type TransferPlan,
 } from "./machines";
 
@@ -95,8 +95,12 @@ export const rpcContract = defineRpcContract({
           name: z.string(),
           connected: z.boolean(),
           isSource: z.boolean(),
-          /** Whether this project has a checkout there (gates "checkout"). */
-          hasCheckout: z.boolean(),
+          /**
+           * Whether this project has a checkout there (gates "checkout").
+           * Null when bb could not read the project's sources — unknown, which
+           * must not be shown as "no checkout".
+           */
+          hasCheckout: z.boolean().nullable(),
         }),
       ),
       sourceMachineId: z.string().nullable(),
@@ -251,9 +255,12 @@ export default async function plugin(bb: BbPluginApi) {
     async listTargets({ threadId, machineId }) {
       const [{ projectId, hostId }, machines] = await Promise.all([
         threadLocation(bb, threadId),
-        listMachines(bb).catch(() => []),
+        // Strict when a machine was named: its providers (and its checkout
+        // flag) must not silently be answered by the source machine instead.
+        machineId ? listMachines(bb) : listMachines(bb).catch(() => []),
       ]);
       const target = machineId ? matchMachine(machines, machineId) : null;
+      if (machineId && !target) throw new TransferError(`Unknown machine "${machineId}".`);
       // Providers are discovered per machine: the target's CLIs decide what
       // this handoff can actually land on, not the source's.
       const environmentId = target ? null : await environmentIdOfThread(bb, threadId);
@@ -266,11 +273,18 @@ export default async function plugin(bb: BbPluginApi) {
         target ? { hostId: target.id } : environmentId ? { environmentId } : undefined,
       );
       // One project fetch for every machine, not one per machine: this is a
-      // pure filter over the project's sources once we have them.
-      const sources = projectId === null ? [] : await projectSources(bb, projectId);
-      const checkouts = machines.map((machine) =>
-        sourcePathOnHostFrom(sources, machine.id) !== null,
-      );
+      // pure filter over the project's sources once we have them. Null means
+      // they could not be read — the checkout is then explicitly unknown, not
+      // absent, so the picker neither blocks a mode nor switches away from it
+      // on a guess. (The named-machine lookup above stays strict; a checkout
+      // hint is not worth failing the agent list over.) A genuine miss still
+      // fails loudly in planTransfer when the handoff actually starts.
+      const sources =
+        projectId === null ? [] : await projectSources(bb, projectId).catch(() => null);
+      const checkouts =
+        sources === null
+          ? null
+          : machines.map((machine) => sourcePathOnHostFrom(sources, machine.id) !== null);
       return {
         providers: providers.map((provider) => ({
           id: provider.id,
@@ -283,7 +297,7 @@ export default async function plugin(bb: BbPluginApi) {
           name: machine.name,
           connected: machine.connected,
           isSource: machine.id === hostId,
-          hasCheckout: checkouts[index] ?? false,
+          hasCheckout: checkouts?.[index] ?? null,
         })),
         sourceMachineId: hostId,
       };
@@ -301,8 +315,10 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
     async listModels({ threadId, providerId, machineId }) {
-      const machines = machineId ? await listMachines(bb).catch(() => []) : [];
-      const target = machineId ? matchMachine(machines, machineId) : null;
+      const target = machineId ? matchMachine(await listMachines(bb), machineId) : null;
+      // Never fall back to the source machine's models for a named target:
+      // that would answer with the wrong machine's list, silently.
+      if (machineId && !target) throw new TransferError(`Unknown machine "${machineId}".`);
       const environmentId = target ? null : await environmentIdOfThread(bb, threadId);
       const options = await bb.sdk.providers.models(
         target
@@ -454,7 +470,15 @@ export default async function plugin(bb: BbPluginApi) {
       if (command === "targets") {
         const threadId = flags.get("--thread") ?? ctx.threadId;
         const machineFlag = flags.get("--machine");
-        const machines = await listMachines(bb).catch(() => []);
+        // A machine the user named cannot be validated against silence; only
+        // the machine list itself degrades when the registry does not answer.
+        let machines: Machine[];
+        try {
+          machines = machineFlag ? await listMachines(bb) : await listMachines(bb).catch(() => []);
+        } catch (error) {
+          if (error instanceof TransferError) return fail(error.message);
+          throw error;
+        }
         const target = machineFlag ? matchMachine(machines, machineFlag) : null;
         if (machineFlag && !target) {
           return fail(

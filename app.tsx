@@ -52,7 +52,8 @@ interface Machine {
   name: string;
   connected: boolean;
   isSource: boolean;
-  hasCheckout: boolean;
+  /** Null when bb could not read the project's sources — unknown, not absent. */
+  hasCheckout: boolean | null;
 }
 
 interface PrepStats {
@@ -310,8 +311,10 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
   const [statsError, setStatsError] = useState<string | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
   const [providers, setProviders] = useState<TargetProvider[] | null>(null);
+  const [targetsError, setTargetsError] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<string>("");
   const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [model, setModel] = useState<string>("__default__");
   /** "" while no model is resolved yet; otherwise a level that model accepts. */
@@ -380,6 +383,7 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
   useEffect(() => {
     let cancelled = false;
     setProviders(null);
+    setTargetsError(null);
     rpc
       .call("listTargets", { threadId, ...(machineId ? { machineId } : {}) })
       .then((result) => {
@@ -391,7 +395,15 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
           current && !result.providers.some((p) => p.id === current && p.available) ? "" : current,
         );
       })
-      .catch(() => !cancelled && setProviders([]));
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        // A named machine bb could not answer for is not "no agents there" —
+        // say what happened instead of leaving an empty picker. The stale
+        // selection goes too, so "Hand off" cannot fire a doomed request.
+        setProviders([]);
+        setProviderId("");
+        setTargetsError(error instanceof Error ? error.message : String(error));
+      });
     return () => {
       cancelled = true;
     };
@@ -402,11 +414,16 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
     let cancelled = false;
     setModels([]);
     setModel("__default__");
+    setModelsError(null);
     setModelsLoading(true);
     rpc
       .call("listModels", { threadId, providerId, ...(machineId ? { machineId } : {}) })
       .then((result) => !cancelled && setModels(result.models))
-      .catch(() => !cancelled && setModels([]))
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setModels([]);
+        setModelsError(error instanceof Error ? error.message : String(error));
+      })
       .finally(() => !cancelled && setModelsLoading(false));
     return () => {
       cancelled = true;
@@ -483,10 +500,12 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
         }
         return stats && !stats.hasEnvironment ? "This thread has no workspace to share." : null;
       }
-      if (mode === "checkout" && machine && !machine.hasCheckout) {
+      // Only a known-absent checkout blocks a mode: an unreadable project list
+      // is not proof the checkout is missing, and spawning reports the truth.
+      if (mode === "checkout" && machine && machine.hasCheckout === false) {
         return `This project has no checkout on ${machine.name}.`;
       }
-      if (mode === "worktree" && crossMachine && targetMachine && !targetMachine.hasCheckout) {
+      if (mode === "worktree" && crossMachine && targetMachine && targetMachine.hasCheckout === false) {
         return `No checkout on ${targetMachine.name} to build a worktree from.`;
       }
       return null;
@@ -734,10 +753,23 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
                   <Skeleton className="h-[52px]" />
                 </div>
               ) : providers.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No agents found on {targetMachine?.name ?? "this machine"}. Install a provider CLI
-                  (codex, claude, opencode…) there and reload.
-                </p>
+                targetsError ? (
+                  <Alert variant="destructive">
+                    <AlertTitle>Couldn&apos;t list target agents</AlertTitle>
+                    <AlertDescription className="flex flex-col items-start gap-2">
+                      {targetsError}
+                      <Button size="sm" variant="outline" onClick={() => setRetryNonce((n) => n + 1)}>
+                        <Icon name="RotateCcw" aria-hidden />
+                        Retry
+                      </Button>
+                    </AlertDescription>
+                  </Alert>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No agents found on {targetMachine?.name ?? "this machine"}. Install a provider CLI
+                    (codex, claude, opencode…) there and reload.
+                  </p>
+                )
               ) : (
                 <div
                   role="radiogroup"
@@ -823,6 +855,8 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
                   </SelectContent>
                 </Select>
               </div>
+            ) : modelsError ? (
+              <p className="text-sm text-destructive">{modelsError}</p>
             ) : null}
 
             {/* Thinking effort — only when the model offers a real choice. */}
@@ -1093,7 +1127,10 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
               </Button>
               <Button
                 onClick={() => void start()}
-                disabled={!providerId || !stats}
+                // `providers === null` is the in-flight window for a newly
+                // picked machine: the previous machine's selection is still
+                // set, and submitting it would target the wrong host.
+                disabled={!providerId || !stats || providers === null}
                 className="min-w-0 max-md:pointer-coarse:h-10"
               >
                 <span className="truncate">

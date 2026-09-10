@@ -4,7 +4,7 @@ import * as os from "node:os";
 import type { BbPluginApi } from "@bb/plugin-sdk";
 import { deriveHomeDir } from "../capture";
 import type { ReasoningLevel } from "../handoff";
-import { listMachines, matchMachine } from "../machines";
+import { listMachines, matchMachine, primaryHostIdOf, type Machine } from "../machines";
 import { ADAPTERS, getAdapter, resolveAgentId } from "./agents";
 import {
   findRemoteSession,
@@ -296,10 +296,7 @@ async function adoptParsedSession(
   // primary host for local adoption, or an explicitly chosen enrolled machine
   // for remote adoption.
   let hostId = context.hostId ?? null;
-  if (!hostId) {
-    const { primaryHostId } = await bb.sdk.system.config();
-    hostId = primaryHostId ?? null;
-  }
+  if (!hostId) hostId = await primaryHostIdOf(bb);
   if (!hostId) {
     return { ok: false, code: "no-host", message: "No host available to run the adopted thread on." };
   }
@@ -553,7 +550,20 @@ async function resolveRemoteContext(
   | { ok: true; local: true }
   | { ok: true; local: false; ctx: RemoteContext }
 > {
-  const machines = await listMachines(bb).catch(() => []);
+  // Strict: a registry that never answers must not read as "no such machine".
+  let machines: Machine[];
+  try {
+    machines = await listMachines(bb);
+  } catch (error) {
+    return {
+      ok: false,
+      outcome: {
+        ok: false,
+        code: "bad-host",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
   const host = matchMachine(machines, machine);
   if (!host) {
     const known = machines.map((m) => m.name).join(", ") || "(none)";
@@ -566,7 +576,7 @@ async function resolveRemoteContext(
       },
     };
   }
-  const { primaryHostId } = await bb.sdk.system.config().catch(() => ({ primaryHostId: null }));
+  const primaryHostId = await primaryHostIdOf(bb);
   if (host.id === primaryHostId) return { ok: true, local: true };
   if (!host.connected) {
     return {

@@ -17,19 +17,26 @@ export interface Machine {
 export class TransferError extends Error {}
 
 export async function listMachines(bb: BbPluginApi): Promise<Machine[]> {
-  const hosts = await bb.sdk.hosts.list();
-  let primaryHostId: string | null = null;
-  try {
-    primaryHostId = (await bb.sdk.system.config()).primaryHostId ?? null;
-  } catch {
-    // No primary reported — every machine is then treated as non-primary.
-  }
+  // Strict: a registry that never answers must not read as "no machines",
+  // which would turn a sleeping machine into "unknown machine".
+  const hosts = await withTimeoutE(
+    bb.sdk.hosts.list(),
+    REMOTE_LOOKUP_TIMEOUT_MS,
+    "The host registry",
+  );
+  const primaryHostId = await primaryHostIdOf(bb);
   return hosts.map((host) => ({
     id: host.id,
     name: host.name,
     connected: host.status === "connected",
     isPrimary: host.id === primaryHostId,
   }));
+}
+
+/** bb's primary host id, bounded — null when bb does not answer or reports none. */
+export async function primaryHostIdOf(bb: BbPluginApi): Promise<string | null> {
+  const config = await withTimeout(bb.sdk.system.config(), REMOTE_LOOKUP_TIMEOUT_MS, null);
+  return config?.primaryHostId ?? null;
 }
 
 /** Resolve a machine by id or (case-insensitive) name. */
@@ -88,20 +95,37 @@ export interface TransferInputs {
  * Anything routed at an explicit `hostId` can reach another machine, and a
  * machine that is asleep or off the network does not fail fast — it just
  * never answers. Inside an rpc handler that stalls bb's shared event loop for
- * as long as the call takes, so every remote lookup here is bounded and
- * degrades to "unknown" instead.
+ * as long as the call takes, so every remote lookup here is bounded.
+ *
+ * This variant degrades to a fallback; use withTimeoutE when the caller acts
+ * on the result and silence must not be mistaken for an answer.
  */
-async function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+const withTimeout = <T,>(work: Promise<T>, ms: number, fallback: T): Promise<T> =>
+  withTimeoutE(work, ms).catch(() => fallback);
+
+/**
+ * Like withTimeout, but strict: a timeout rejects with a user-facing
+ * TransferError and genuine failures propagate. For lookups whose silence
+ * must not be mistaken for an answer — a machine the user named cannot be
+ * validated against a registry that never replies.
+ */
+async function withTimeoutE<T>(work: Promise<T>, ms: number, subject = "bb"): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       work,
-      new Promise<T>((resolve) => {
-        timer = setTimeout(() => resolve(fallback), ms);
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new TransferError(
+                `${subject} did not answer within ${ms}ms — the machine may be asleep or offline.`,
+              ),
+            ),
+          ms,
+        );
       }),
     ]);
-  } catch {
-    return fallback;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -109,6 +133,13 @@ async function withTimeout<T>(work: Promise<T>, ms: number, fallback: T): Promis
 
 /** Remote lookups in a handler get this long before they are written off. */
 export const REMOTE_LOOKUP_TIMEOUT_MS = 3_000;
+
+/**
+ * Workspace inspection is the handoff's payload rather than a planning
+ * lookup, so it gets longer: these calls run git on the source machine, over
+ * a tree that may be large.
+ */
+export const WORKSPACE_LOOKUP_TIMEOUT_MS = 20_000;
 
 /** The sources a checkout lookup needs, without refetching the project list. */
 export interface ProjectSourceLike {
@@ -127,22 +158,22 @@ export function sourcePathOnHostFrom(
   return chosen?.path ?? null;
 }
 
-/** The project's checkout on one host, preferring the default source. */
-export async function sourcePathOnHost(
-  bb: BbPluginApi,
-  projectId: string,
-  hostId: string,
-): Promise<string | null> {
-  const sources = await projectSources(bb, projectId);
-  return sourcePathOnHostFrom(sources, hostId);
-}
-
-/** One project-list fetch, reusable across every machine in a request. */
+/**
+ * One project-list fetch, reusable across every machine in a request.
+ *
+ * Strict: fetching sources touches hosts the project lives on, and callers
+ * act on an empty result ("add a source for that machine"), so silence must
+ * not be reported as one.
+ */
 export async function projectSources(
   bb: BbPluginApi,
   projectId: string,
 ): Promise<readonly ProjectSourceLike[]> {
-  const projects = await bb.sdk.projects.list({ includePersonal: true }).catch(() => []);
+  const projects = await withTimeoutE(
+    bb.sdk.projects.list({ includePersonal: true }),
+    REMOTE_LOOKUP_TIMEOUT_MS,
+    "The project list",
+  );
   return projects.find((candidate) => candidate.id === projectId)?.sources ?? [];
 }
 
@@ -238,7 +269,8 @@ export async function planTransfer(bb: BbPluginApi, inputs: TransferInputs): Pro
   if (inputs.workspace === "personal") return plan;
 
   if (inputs.workspace === "checkout") {
-    const checkoutPath = hostId ? await sourcePathOnHost(bb, inputs.projectId, hostId) : null;
+    const sources = hostId ? await projectSources(bb, inputs.projectId) : [];
+    const checkoutPath = hostId ? sourcePathOnHostFrom(sources, hostId) : null;
     if (!checkoutPath) {
       throw new TransferError(
         `This project has no checkout on ${targetLabel} — add one to the project's sources first, or hand off to a new worktree or a blank workspace.`,
@@ -252,7 +284,7 @@ export async function planTransfer(bb: BbPluginApi, inputs: TransferInputs): Pro
   // default branch" meaning; crossing machines it would silently strand the
   // agent on the wrong history, so there the source branch is carried over.
   if (crossMachine && hostId) {
-    if (!(await sourcePathOnHost(bb, inputs.projectId, hostId))) {
+    if (!sourcePathOnHostFrom(await projectSources(bb, inputs.projectId), hostId)) {
       throw new TransferError(
         `This project has no checkout on ${targetLabel}, so there is nothing to build a worktree from. Add a source for it there, or hand off to a blank personal workspace.`,
       );
@@ -305,8 +337,15 @@ export async function captureWorkingState(
 ): Promise<WorkingState | null> {
   let status: Awaited<ReturnType<typeof bb.sdk.environments.status>>;
   try {
-    status = await bb.sdk.environments.status({ environmentId });
-  } catch {
+    status = await withTimeoutE(
+      bb.sdk.environments.status({ environmentId }),
+      WORKSPACE_LOOKUP_TIMEOUT_MS,
+      "The source workspace",
+    );
+  } catch (error) {
+    // A genuine failure means there is nothing to carry. A stall is not an
+    // answer: returning null there would silently drop uncommitted work.
+    if (error instanceof TransferError) throw error;
     return null;
   }
   if (status.outcome !== "available") return null;
@@ -331,11 +370,15 @@ export async function captureWorkingState(
   if (!state.dirty) return state;
 
   try {
-    const result = await bb.sdk.environments.diffPatch({
-      environmentId,
-      target: { type: "uncommitted" },
-      paths: files.map((file) => file.path),
-    });
+    const result = await withTimeoutE(
+      bb.sdk.environments.diffPatch({
+        environmentId,
+        target: { type: "uncommitted" },
+        paths: files.map((file) => file.path),
+      }),
+      WORKSPACE_LOOKUP_TIMEOUT_MS,
+      "The source workspace",
+    );
     if (result.outcome !== "available") {
       state.note = "message" in result ? result.message : result.failure.message;
       return state;
@@ -371,12 +414,16 @@ export async function deliverPatch(
 ): Promise<string | null> {
   const path = `/tmp/bb-handoff-${options.sourceThreadId}.patch`;
   try {
-    const written = await bb.sdk.files.write({
-      hostId: options.hostId,
-      path,
-      content: options.patch,
-      createParents: true,
-    });
+    const written = await withTimeoutE(
+      bb.sdk.files.write({
+        hostId: options.hostId,
+        path,
+        content: options.patch,
+        createParents: true,
+      }),
+      WORKSPACE_LOOKUP_TIMEOUT_MS,
+      "The target machine",
+    );
     return written.outcome === "written" ? path : null;
   } catch {
     return null;

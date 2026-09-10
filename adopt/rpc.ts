@@ -3,7 +3,7 @@
 // they don't collide with the handoff methods.
 import type { BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
-import { listMachines, matchMachine, type Machine } from "../machines";
+import { listMachines, matchMachine, primaryHostIdOf, type Machine } from "../machines";
 import {
   collectSessions,
   listRemoteSessionsForDirectory,
@@ -105,10 +105,19 @@ async function resolveRemoteTarget(
   machineId: string | null | undefined,
 ): Promise<{ remote: Machine | null; error: string | null }> {
   if (!machineId) return { remote: null, error: null };
-  const machines = await listMachines(bb).catch(() => []);
+  // Strict: a registry that never answers must not read as "no such machine".
+  let machines: Machine[];
+  try {
+    machines = await listMachines(bb);
+  } catch (error) {
+    return {
+      remote: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
   const target = matchMachine(machines, machineId);
   if (!target) return { remote: null, error: `Unknown machine "${machineId}".` };
-  const { primaryHostId } = await bb.sdk.system.config().catch(() => ({ primaryHostId: null }));
+  const primaryHostId = await primaryHostIdOf(bb);
   if (target.id === primaryHostId) return { remote: null, error: null };
   if (!target.connected) {
     return {

@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { BbPluginApi } from "@bb/plugin-sdk";
-import { captureWorkingState, planTransfer, TransferError, type WorkspaceMode } from "./machines";
+import {
+  captureWorkingState,
+  listMachines,
+  planTransfer,
+  REMOTE_LOOKUP_TIMEOUT_MS,
+  TransferError,
+  WORKSPACE_LOOKUP_TIMEOUT_MS,
+  type WorkspaceMode,
+} from "./machines";
 
 const MACBOOK = { id: "host_mac", name: "Vedrans-MacBook-Pro", status: "connected" as const };
 const MINI = { id: "host_mini", name: "mini", status: "connected" as const };
@@ -12,6 +20,10 @@ interface FakeOptions {
   branches?: string[];
   primaryHostId?: string | null;
   hostsThrow?: boolean;
+  /** Host registry never answers — the bounded-lookup path. */
+  hostsHang?: boolean;
+  /** Project list never answers. */
+  projectsHang?: boolean;
 }
 
 function makeBb(options: FakeOptions = {}) {
@@ -24,6 +36,7 @@ function makeBb(options: FakeOptions = {}) {
     sdk: {
       hosts: {
         list: async () => {
+          if (options.hostsHang) return new Promise(() => {});
           if (options.hostsThrow) throw new Error("daemon unreachable");
           return hosts;
         },
@@ -32,7 +45,10 @@ function makeBb(options: FakeOptions = {}) {
         config: async () => ({ primaryHostId: options.primaryHostId ?? MACBOOK.id }),
       },
       projects: {
-        list: async () => [{ id: "proj_1", name: "aurora", sources }],
+        list: async () => {
+          if (options.projectsHang) return new Promise(() => {});
+          return [{ id: "proj_1", name: "aurora", sources }];
+        },
         branches: async ({ hostId }: { hostId: string }) => ({
           branches: hostId === MINI.id ? (options.branches ?? []) : ["main", "feature-x"],
         }),
@@ -72,6 +88,62 @@ describe("planTransfer", () => {
     await expect(plan(makeBb({ hostsThrow: true }), "checkout", "mini")).rejects.toThrow(
       "daemon unreachable",
     );
+  });
+
+  it("gives up on a host registry that never answers, instead of hanging", async () => {
+    vi.useFakeTimers();
+    try {
+      const assertion = expect(listMachines(makeBb({ hostsHang: true }))).rejects.toThrow(
+        "did not answer",
+      );
+      await vi.advanceTimersByTimeAsync(REMOTE_LOOKUP_TIMEOUT_MS + 1);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails loudly when a named machine cannot be validated because the registry stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      // The distinction that matters: not "unknown machine", which would send
+      // the user looking for a machine they already have.
+      const assertion = expect(plan(makeBb({ hostsHang: true }), "worktree", "mini")).rejects.toThrow(
+        "did not answer",
+      );
+      await vi.advanceTimersByTimeAsync(REMOTE_LOOKUP_TIMEOUT_MS + 1);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps working when the registry stalls and no machine was named", async () => {
+    vi.useFakeTimers();
+    try {
+      const assertion = plan(makeBb({ hostsHang: true }), "reuse");
+      await vi.advanceTimersByTimeAsync(REMOTE_LOOKUP_TIMEOUT_MS + 1);
+      expect(await assertion).toMatchObject({
+        hostId: MACBOOK.id,
+        crossMachine: false,
+        hostName: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a stalled project list instead of claiming there is no checkout", async () => {
+    vi.useFakeTimers();
+    try {
+      const assertion = expect(plan(makeBb({ projectsHang: true }), "checkout", "mini")).rejects.toThrow(
+        "project list did not answer",
+      );
+      await vi.advanceTimersByTimeAsync(REMOTE_LOOKUP_TIMEOUT_MS + 1);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("detects the machine change and resolves that machine's checkout", async () => {
@@ -241,5 +313,32 @@ describe("captureWorkingState", () => {
   it("returns null when the environment cannot be inspected", async () => {
     const { bb } = makeStatusBb({ outcome: "unavailable", failure: { code: "path_not_found" } });
     expect(await captureWorkingState(bb, "env_1")).toBeNull();
+  });
+
+  it("refuses to call a stalled source workspace clean", async () => {
+    vi.useFakeTimers();
+    try {
+      // Silence from the source must not read as "nothing to carry".
+      const assertion = expect(
+        captureWorkingState(makeStatusBb(new Promise(() => {})).bb, "env_1"),
+      ).rejects.toThrow("did not answer");
+      await vi.advanceTimersByTimeAsync(WORKSPACE_LOOKUP_TIMEOUT_MS + 1);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says why a stalled patch read left the dirty tree behind", async () => {
+    vi.useFakeTimers();
+    try {
+      const assertion = captureWorkingState(makeStatusBb(DIRTY_STATUS, new Promise(() => {})).bb, "env_1");
+      await vi.advanceTimersByTimeAsync(WORKSPACE_LOOKUP_TIMEOUT_MS + 1);
+      const state = await assertion;
+      expect(state).toMatchObject({ dirty: true, patch: null });
+      expect(state?.note).toContain("did not answer");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
