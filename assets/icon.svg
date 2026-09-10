@@ -1,4 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="2 2 20 20" fill="#1f2430">
-  <path d="M3 8.25h13.19l-2.72-2.72 1.06-1.06 4.53 4.53-4.53 4.53-1.06-1.06 2.72-2.72H3v-1.5Z"/>
-  <path d="M21 15.75h-13.19l2.72-2.72-1.06-1.06-4.53 4.53 4.53 4.53 1.06-1.06-2.72-2.72H21v-1.5Z"/>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  style="color-scheme: light dark"
+>
+  <style>
+    path { stroke: #171717; }
+    @media (prefers-color-scheme: dark) {
+      path { stroke: #f5f5f5; }
+    }
+  </style>
+  <path d="m16 3 4 4-4 4"/>
+  <path d="M20 7H4"/>
+  <path d="m8 21-4-4 4-4"/>
+  <path d="M4 17h16"/>
 </svg>
