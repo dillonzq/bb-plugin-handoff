@@ -4,7 +4,7 @@
 // shell that reads as one quiet form (route header source → target, target
 // picker, workspace, notes) with a sticky action footer that turns into a
 // live progress rail during a handoff.
-// In: the "Adopt agent session" compose-screen section (adopt/section.tsx).
+// In: the "Adopt agent session" settings section (adopt/section.tsx).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
@@ -20,7 +20,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 // bb's vendored controls carry no coarse-pointer sizing of their own — the app
 // adds it per call site, so a plugin that wants to feel native must too.
-import { COARSE_POINTER_INPUT_HEIGHT_CLASS } from "@/components/ui/coarse-pointer-sizing";
+import {
+  COARSE_POINTER_INPUT_HEIGHT_CLASS,
+  COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS,
+} from "@/components/ui/coarse-pointer-sizing";
 import {
   Dialog,
   DialogContent,
@@ -1197,7 +1200,34 @@ function HandoffPanel({ threadId, params }: { threadId: string; params?: unknown
   );
 }
 
+function AdoptSettingsAction() {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            asChild
+            size="icon"
+            variant="ghost"
+            className={COARSE_POINTER_PROMPT_ICON_ACTION_BUTTON_CLASS}
+          >
+            <a href="/settings/plugins/handoff" aria-label="Import agent session">
+              <Icon name="Download" aria-hidden />
+            </a>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">Import agent session</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 export default definePluginApp((app) => {
+  app.composer.customize({
+    id: "adopt-settings",
+    scopes: ["new-thread"],
+    actions: [{ id: "open", component: AdoptSettingsAction }],
+  });
   app.slots.threadPanelAction({
     id: "handoff",
     title: "Hand off",
@@ -1222,9 +1252,10 @@ export default definePluginApp((app) => {
       if (!opened) toast.error("Couldn't open the Hand off panel here.");
     },
   });
-  app.slots.homepageSection({
+  app.slots.settingsSection({
     id: "adopt",
     title: "Adopt agent session",
+    description: "Continue an external agent session as a new bb thread.",
     component: AdoptSection,
   });
 });

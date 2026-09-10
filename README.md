@@ -111,9 +111,9 @@ it discusses are on a disk the next agent can't see. So the handoff also:
 The other direction. You've been working in a plain terminal, it's turning into
 real work, and you want it in bb — with its history, in its own directory.
 
-![The Adopt agent session panel listing recent Claude, Codex and OpenCode sessions for a project](assets/screenshots/adopt-session.png)
+![The Adopt agent session settings section listing recent Claude, Codex and OpenCode sessions for a project](assets/screenshots/adopt-session.png)
 
-On the new-thread screen, expand **Continue a session from another agent**.
+In Settings → Handoff, expand **Continue a session from another agent** under **Adopt agent session**.
 Paste a session id — or the whole resume command you'd have typed —
 
 ```

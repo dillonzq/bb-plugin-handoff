@@ -1,4 +1,4 @@
-// "Adopt agent session" — a section on the new-thread (compose) screen.
+// "Adopt agent session" — a section on the plugin's Settings page.
 //
 // Primary flow: paste a session id — or a whole resume command like
 // `claude --resume <id>` — and adopt. The backend parses the id and locates
@@ -121,12 +121,13 @@ function SessionRowButton({
   );
 }
 
-export function AdoptSection({ projectId: projectIdProp }: { projectId: string | null }) {
+export function AdoptSection({
+  projectId: projectIdProp = null,
+}: { projectId?: string | null } = {}) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
 
-  // The whole section stays collapsed to a quiet one-liner until opened —
-  // starting a fresh thread is the primary action on this screen, not this.
+  // Keep the flow collapsed to a quiet one-liner until opened so Settings stays compact.
   const [open, setOpen] = useState(false);
 
   // Primary paste flow
